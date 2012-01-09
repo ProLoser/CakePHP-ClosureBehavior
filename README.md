@@ -6,5 +6,14 @@ I was working on a project, where I listed multiple posts on the homepage and wa
 
 After searching for feedback on irc.freenode.net/php someone pointed me to an [interesting slideshow](http://www.slideshare.net/billkarwin/sql-antipatterns-strike-back) where I learned about the 'Closure' pattern (page 68). It seems to be a much more efficient alternative to MPTT. So this is my attempt to implement it.
 
-## Installation
+An interesting example implementation: http://codepad.org/pR5r68V0
 
+## Installation
+### With Git
+
+```
+git submodule add git@github.com:ProLoser/CakePHP-ClosureBehavior.git Plugin/Closure
+```
+
+### Without Git
+[Download package](https://github.com/ProLoser/CakePHP-ClosureBehavior/downloads) and extract to Plugin/Closure
