@@ -19,6 +19,20 @@ class ClosureBehavior extends ModelBehavior {
 	 * @see Model::$alias
 	 */
 	var $settings = array();
+	
+	/**
+	 * Defaul setting values
+	 *
+	 * @access private
+	 * @var array
+	 */
+    private $defaults = array(
+    	'limit' => false,
+    	'auto' => true,
+    	'ignore' => array(),
+    	'useDbConfig' => null,
+    	'model' => null
+    );
 
 	/**
 	 * Allows the mapping of preg-compatible regular expressions to public or
@@ -30,7 +44,15 @@ class ClosureBehavior extends ModelBehavior {
 	 * @access public
 	 */
 	var $mapMethods = array();
-
+	
+	/**
+	 * Shadow table prefix
+	 * Only change this value if it causes table name crashes
+	 *
+	 * @access private
+	 * @var string
+	 */
+	private $suffix = '_treepaths';
 
 	/**
 	 * Initiate Closure Behavior
@@ -41,7 +63,12 @@ class ClosureBehavior extends ModelBehavior {
 	 * @access public
 	 */
 	function setup(&$model, $config = array()) {
-
+		if (is_array($config)) {
+			$this->settings[$model->alias] = array_merge($this->defaults, $config);			
+		} else {
+			$this->settings[$model->alias] = $this->defaults;
+		}		
+		$this->createShadowModel($model);
 	}
 
 	/* -- All possible behavior callbacks have been stubbed out. Remove those you do not need. -- */
@@ -102,6 +129,13 @@ class ClosureBehavior extends ModelBehavior {
 	 * @return boolean True if the operation succeeded, false otherwise
 	 */
 	function afterSave(&$model, $created) { 
+		if ($created) {
+			// INSERT INTO Comments ... <-- generates comment #8
+			// INSERT INTO TreePaths (ancestor, descendant) VALUES (8,8)
+			// INSERT INTO TreePaths (ancestor, descendant) SELECT ancestor, 8 FROM TreePaths WHERE descendant = 5
+			$model->ShadowModel->create();
+			return $model->ShadowModel->save(array('ancestor' => $model->id, 'descendant' => $model->id));
+		}
 		return true;
 	}
 
@@ -114,6 +148,8 @@ class ClosureBehavior extends ModelBehavior {
 	 * @access public
 	 */
 	function beforeDelete(&$model, $cascade = true) { 
+		$this->deleteCascade = $cascade;
+		$this->deleteId = $model->id;
 		return true;
 	}
 
@@ -124,7 +160,9 @@ class ClosureBehavior extends ModelBehavior {
 	 * @access public
 	 */
 	function afterDelete(&$model) {
-
+		if ($this->deleteCascade) {
+			$this->_deleteSubtree($this->deleteId);
+		}
 	}
 
 	/**
@@ -136,6 +174,122 @@ class ClosureBehavior extends ModelBehavior {
 	 */
 	function onError(&$model, $error) { 
 	
+	}
+	
+	/**
+	 * Returns a generic model that maps to the current $model's shadow table.
+	 *
+	 * @param object $model
+	 * @return boolean
+	 */
+	private function createShadowModel(&$model) {
+		if (is_null($this->settings[$model->alias]['useDbConfig'])) {
+			$dbConfig = $model->useDbConfig;
+		} else {
+			$dbConfig = $this->settings[$model->alias]['useDbConfig'];			
+		}
+		$db = & ConnectionManager::getDataSource($dbConfig);
+		if ($model->useTable) {
+			$shadow_table = $model->useTable;	
+		} else {
+			$shadow_table = Inflector::tableize($model->name);
+		}
+		$shadow_table = $shadow_table . $this->revision_suffix;
+		$prefix = $model->tablePrefix ? $model->tablePrefix : $db->config['prefix'];
+		$full_table_name = $prefix . $shadow_table;
+
+		$existing_tables = $db->listSources();
+		if (!in_array($full_table_name, $existing_tables)) {
+			$model->ShadowModel = false;
+			return false;
+		}  
+		$useShadowModel = $this->settings[$model->alias]['model'];
+		if (is_string($useShadowModel) && App::import('model', $useShadowModel)) {
+			$model->ShadowModel = new $useShadowModel(false, $shadow_table, $dbConfig);
+		} else {
+			$model->ShadowModel = new Model(false, $shadow_table, $dbConfig);
+		}			
+		if ($model->tablePrefix) {
+			$model->ShadowModel->tablePrefix = $model->tablePrefix;
+		}
+		$model->ShadowModel->alias = $model->alias;
+		return true;
+	}
+	
+	public function _deleteSubtree($ancestor) {
+		// DELETE FROM TreePaths WHERE descendant IN (SELECT descendant FROM TreePaths WHERE ancestor = 4)
+		// DELETE p FROM TreePaths p JOIN TreePaths a USING (descendant) WHERE a.ancestor = 4
+	}
+	
+	public function _deleteChildren($descendant) {
+		// DELETE FROM TreePaths WHERE descendant = 7
+		// ON DELETE CASCADE
+	}
+
+	public function _findDescendants($model, $state, $query, $results = array()) {
+		// SELECT c.* FROM Comments c JOIN TreePaths t ON (c.comment_id = t.descendant) WHERE t.ancestor = 4
+		if ($state === 'before') {
+			$query['joins'][] = array(
+				'alias' => $model->ShadowModel->alias,
+				'table' => '',
+				'type' => '',
+				'conditions' => "`{$model->alias}`.`{$model->primaryKey}` = `{$model->ShadowModel->alias}`.`descendant`",
+			);
+			$query['conditions'][$model->ShadowModel->alias.'.ancestor'] = $query['id'];
+			return $query;
+		} elseif ($state === 'after') {
+			return $results;
+		}
+	}
+	
+	public function _findAncestors($model, $state, $query, $results = array()) {
+		// SELECT c.* FROM Comments c JOIN TreePaths t ON (c.comment_id = t.ancestor) WHERE t.descendant = 4
+		if ($state === 'before') {
+			$query['joins'][] = array(
+				'alias' => $model->ShadowModel->alias,
+				'table' => '',
+				'type' => '',
+				'conditions' => "`{$model->alias}`.`{$model->primaryKey}` = `{$model->ShadowModel->alias}`.`ancestor`",
+			);
+			$query['conditions'][$model->ShadowModel->alias.'.descendant'] = $query['id'];
+			return $query;
+		} elseif ($state === 'after') {
+			return $results;
+		}
+	}
+	
+	public function _findParents($model, $state, $query, $results = array()) {
+		// SELECT c.* FROM Comments c JOIN TreePaths t ON (c.comment_id = t.descendant) WHERE t.ancestor = 4 AND t.depth = 1
+		if ($state === 'before') {
+			$query['joins'][] = array(
+				'alias' => $model->ShadowModel->alias,
+				'table' => '',
+				'type' => '',
+				'conditions' => "`{$model->alias}`.`{$model->primaryKey}` = `{$model->ShadowModel->alias}`.`ancestor`",
+			);
+			$query['conditions'][$model->ShadowModel->alias.'.ancestor'] = $query['id'];
+			$query['conditions'][$model->ShadowModel->alias.'.depth'] = $query['depth'];
+			return $query;
+		} elseif ($state === 'after') {
+			return $results;
+		}
+	}
+	
+	public function _findChildren($model, $state, $query, $results = array()) {
+		// SELECT c.* FROM Comments c JOIN TreePaths t ON (c.comment_id = t.ancestor) WHERE t.descendant = 4 AND t.depth = 1
+		if ($state === 'before') {
+			$query['joins'][] = array(
+				'alias' => $model->ShadowModel->alias,
+				'table' => '',
+				'type' => '',
+				'conditions' => "`{$model->alias}`.`{$model->primaryKey}` = `{$model->ShadowModel->alias}`.`descendant`",
+			);
+			$query['conditions'][$model->ShadowModel->alias.'.descendant'] = $query['id'];
+			$query['conditions'][$model->ShadowModel->alias.'.depth'] = $query['depth'];
+			return $query;
+		} elseif ($state === 'after') {
+			return $results;
+		}
 	}
 
 }
